@@ -40,11 +40,50 @@ proxies = {
 } if settings.HTTP_PROXY or settings.HTTPS_PROXY else None
 
 
+# In-memory cache of product names already confirmed to exist in DefectDojo.
+#
+# check_product_exists() runs on EVERY single report import (it is not gated by any
+# settings flag), doing a GET against /api/v2/products/?name=<name>. DefectDojo's Product
+# API serializer embeds the FULL findings_list (every finding id belonging to that product)
+# in the response body. For a product with a large findings backlog that single lookup gets
+# progressively more expensive as findings accumulate - observed 500ms up to ~39s against a
+# product with ~157k findings. Because Trivy scans/report imports happen very frequently
+# across many products, many concurrently-slow lookups saturated DefectDojo's uwsgi workers,
+# causing health-check timeouts and a crash loop.
+#
+# A product's existence is effectively immutable for the lifetime of the operator process -
+# products are not deleted/recreated as part of normal import flow - so once we've confirmed
+# a product exists there is no need to ever ask DefectDojo again for that name.
+#
+# We deliberately do NOT cache negative ("does not exist yet") results indefinitely: those
+# responses are cheap (DefectDojo returns an empty result set with no findings_list to
+# serialize) and only occur for brand-new products, right up until they get auto-created by
+# the reimport-scan call that follows (see product_type_name handling in send_to_dojo below).
+# Caching a negative result would risk permanently omitting product_type_name for a product
+# that has since been created, which would break auto-creation entirely. Re-checking on every
+# call until the product exists costs nothing extra (cheap response), and the cache then
+# takes over permanently once membership is confirmed. send_to_dojo also proactively adds a
+# product to this cache right after a successful create-import, so a freshly created product
+# does not even need that one extra confirmation GET on its next report.
+#
+# This is a plain module-level set rather than functools.lru_cache because lru_cache would
+# also hash the non-cacheable `logger` argument, and because the negative-caching tradeoff
+# above needs custom logic that a straight memoizing decorator doesn't support.
+_known_existing_products: set[str] = set()
+
+
 def check_product_exists(product_name: str, logger) -> bool:
     """
     Check if a product with the given name already exists in DefectDojo.
     Returns True if the product exists, False otherwise.
+
+    Positive results are cached for the lifetime of the process (see
+    _known_existing_products above) to avoid re-running an expensive lookup on every single
+    report import.
     """
+    if product_name in _known_existing_products:
+        return True
+
     headers: dict = {
         "Authorization": "Token " + settings.DEFECT_DOJO_API_KEY,
         "Accept": "application/json",
@@ -64,6 +103,7 @@ def check_product_exists(product_name: str, logger) -> bool:
         # Check if any products were returned
         if data.get("count", 0) > 0:
             logger.info(f"Product '{product_name}' already exists in DefectDojo")
+            _known_existing_products.add(product_name)
             return True
         else:
             logger.info(f"Product '{product_name}' does not exist yet in DefectDojo")
@@ -329,3 +369,10 @@ for report in settings.REPORTS:
             c.labels("success").inc()
             logger.info(f"Finished {body['kind']} {meta['name']}")
             logger.debug(response.content)
+
+            # If we just imported with product_type_name set, DefectDojo has now created
+            # (or already had) this product. Mark it as known-existing right away so the
+            # next report for the same product hits the cache instead of needing one more
+            # confirmation GET against /api/v2/products/.
+            if not product_exists:
+                _known_existing_products.add(_DEFECT_DOJO_PRODUCT_NAME)

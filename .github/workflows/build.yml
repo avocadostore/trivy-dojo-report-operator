@@ -45,5 +45,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           context: .
           push: true
-          tags: ghcr.io/telekom-mms/docker-trivy-dojo-operator:latest,ghcr.io/telekom-mms/docker-trivy-dojo-operator:${{ github.event.release.tag_name }}
+          tags: ghcr.io/avocadostore/trivy-dojo-report-operator:latest,ghcr.io/avocadostore/trivy-dojo-report-operator:${{ github.event.release.tag_name }}
         if: github.event_name == 'release'
