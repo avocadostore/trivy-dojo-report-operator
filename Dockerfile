@@ -16,8 +16,13 @@ RUN groupadd --gid 1000 app && \
 
 COPY --from=build /app /app
 
+# Exact apt patch-version pins (jq/kubectl/curl) go stale as the Debian mirror
+# moves forward and break every build once the pinned version is superseded
+# (hit this in practice: 2026-08). The base image digest above already pins
+# the OS baseline, so we rely on that for reproducibility instead.
+# hadolint ignore=DL3008
 RUN apt-get update -y -qq && \
-    apt-get install -y -qq --no-install-recommends jq=1.7.1-6+deb13u1 kubectl=1.32.3+ds-2 curl=8.14.1-2+deb13u2 && \
+    apt-get install -y -qq --no-install-recommends jq kubectl curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY src/* /app/
